@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-from db import get_connection, add_car, log_order, calculate_inventory_value
+from db import get_connection, add_car, log_order, calculate_inventory_value, record_purchase, init_purchases_table
 from inventory_management import update_car, delete_car
 from sales_analytics import get_sales_analytics
 from best_sellers import get_best_sellers
@@ -19,6 +19,9 @@ def get_inventory():
 
 
 # Dashboard title
+# Ensure the stock purchases table exists.
+init_purchases_table()
+
 st.title("CollectWithAkash - Diecast Store Manager")
 
 st.write("Manage your diecast inventory, sales, and profits in one place.")
@@ -257,6 +260,120 @@ else:
     st.info("Add a car before recording a sale.")
 
 # Search and filter inventory
+
+# Stock Purchases & Restocking
+st.divider()
+st.header("Stock Purchases & Restocking")
+st.write("Record new stock purchases and track your restocking costs.")
+
+connection = get_connection()
+try:
+    purchase_cars = connection.execute(
+        "SELECT id, brand, model, stock FROM cars ORDER BY brand, model"
+    ).fetchall()
+
+    purchase_history = connection.execute("""
+        SELECT
+            p.id AS Purchase_ID,
+            p.purchase_date AS Purchase_Date,
+            c.brand AS Brand,
+            c.model AS Model,
+            p.quantity AS Quantity,
+            p.unit_cost AS Unit_Cost,
+            p.quantity * p.unit_cost AS Total_Cost,
+            p.supplier AS Supplier,
+            p.notes AS Notes
+        FROM purchases p
+        JOIN cars c ON c.id = p.car_id
+        ORDER BY p.id DESC
+    """).fetchall()
+finally:
+    connection.close()
+
+if not purchase_cars:
+    st.info("Add a car to your inventory before recording a stock purchase.")
+else:
+    car_options = {
+        f"ID {car[0]} - {car[1]} {car[2]} (Current stock: {car[3]})": car[0]
+        for car in purchase_cars
+    }
+
+    with st.form("stock_purchase_form"):
+        selected_car = st.selectbox(
+            "Select diecast model",
+            options=list(car_options.keys())
+        )
+        purchase_quantity = st.number_input(
+            "Quantity purchased",
+            min_value=1,
+            value=1,
+            step=1
+        )
+        purchase_unit_cost = st.number_input(
+            "Cost per unit (\u20b9)",
+            min_value=0.0,
+            value=0.0,
+            step=10.0,
+            format="%.2f"
+        )
+        purchase_supplier = st.text_input("Supplier")
+        purchase_date = st.date_input("Purchase date")
+        purchase_notes = st.text_area("Notes (optional)")
+
+        purchase_submitted = st.form_submit_button(
+            "Record Purchase & Restock",
+            type="primary"
+        )
+
+    if purchase_submitted:
+        try:
+            purchase_id = record_purchase(
+                car_id=int(car_options[selected_car]),
+                quantity=int(purchase_quantity),
+                unit_cost=float(purchase_unit_cost),
+                supplier=purchase_supplier,
+                purchase_date=purchase_date,
+                notes=purchase_notes
+            )
+            st.success(
+                f"Purchase #{purchase_id} recorded. "
+                f"{int(purchase_quantity)} unit(s) added to inventory."
+            )
+            st.rerun()
+        except (ValueError, TypeError) as error:
+            st.error(str(error))
+        except Exception as error:
+            st.error(f"Could not record purchase: {error}")
+
+st.subheader("Purchase History")
+
+if purchase_history:
+    purchase_df = pd.DataFrame(
+        [tuple(row) for row in purchase_history],
+        columns=[
+            "Purchase ID",
+            "Date",
+            "Brand",
+            "Model",
+            "Quantity",
+            "Unit Cost (INR)",
+            "Total Cost (INR)",
+            "Supplier",
+            "Notes"
+        ]
+    )
+    st.dataframe(
+        purchase_df,
+        use_container_width=True,
+        hide_index=True
+    )
+    st.metric(
+        "Total Recorded Purchase Cost",
+        f"INR {purchase_df['Total Cost (INR)'].sum():,.2f}"
+    )
+else:
+    st.info("No stock purchases have been recorded yet.")
+
 st.subheader("Search Inventory")
 
 search_term = st.text_input(

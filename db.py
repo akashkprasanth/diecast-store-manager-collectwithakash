@@ -1,8 +1,7 @@
 """ 
 Diecast Store Manager 
 Database setup 
-""" 
- 
+"""
 import sqlite3 
  
 # Database filename 
@@ -19,7 +18,7 @@ def init_db():
  
     connection = get_connection() 
     cursor = connection.cursor() 
- 
+
     # Create the cars table 
     cursor.execute(""" 
         CREATE TABLE IF NOT EXISTS cars ( 
@@ -231,6 +230,97 @@ def check_low_stock(threshold=3):
     connection.close() 
     return low_stock_cars 
  
+
+
+def init_purchases_table():
+    """Create the stock purchases table if it does not exist."""
+    connection = get_connection()
+    try:
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS purchases (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                car_id INTEGER NOT NULL,
+                quantity INTEGER NOT NULL CHECK (quantity > 0),
+                unit_cost REAL NOT NULL CHECK (unit_cost >= 0),
+                supplier TEXT NOT NULL DEFAULT '',
+                purchase_date TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                notes TEXT NOT NULL DEFAULT '',
+                FOREIGN KEY (car_id) REFERENCES cars(id)
+            )
+        """)
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def record_purchase(
+    car_id,
+    quantity,
+    unit_cost,
+    supplier="",
+    purchase_date=None,
+    notes=""
+):
+    """Record a purchase and increase stock in one transaction."""
+    import math
+    from datetime import date
+
+    if isinstance(car_id, bool) or not isinstance(car_id, int) or car_id <= 0:
+        raise ValueError("Please select a valid car ID.")
+
+    if isinstance(quantity, bool) or not isinstance(quantity, int) or quantity <= 0:
+        raise ValueError("Quantity must be a positive whole number.")
+
+    if isinstance(unit_cost, bool) or not isinstance(unit_cost, (int, float)):
+        raise ValueError("Unit cost must be a valid number.")
+
+    if not math.isfinite(unit_cost) or unit_cost < 0:
+        raise ValueError("Unit cost must be finite and non-negative.")
+
+    supplier = (supplier or "").strip()
+    notes = (notes or "").strip()
+
+    if purchase_date is None:
+        purchase_date = date.today().isoformat()
+    elif hasattr(purchase_date, "isoformat"):
+        purchase_date = purchase_date.isoformat()
+    else:
+        purchase_date = str(purchase_date).strip()
+
+    if not purchase_date:
+        raise ValueError("Purchase date is required.")
+
+    connection = get_connection()
+    try:
+        cursor = connection.cursor()
+
+        cursor.execute("SELECT id FROM cars WHERE id = ?", (car_id,))
+        if cursor.fetchone() is None:
+            raise ValueError("The selected car does not exist.")
+
+        cursor.execute("""
+            INSERT INTO purchases
+                (car_id, quantity, unit_cost, supplier, purchase_date, notes)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (car_id, quantity, unit_cost, supplier, purchase_date, notes))
+
+        purchase_id = cursor.lastrowid
+
+        cursor.execute(
+            "UPDATE cars SET stock = stock + ? WHERE id = ?",
+            (quantity, car_id)
+        )
+
+        connection.commit()
+        return purchase_id
+
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
 if __name__ == "__main__": 
     init_db() 
     update_orders_table() 
