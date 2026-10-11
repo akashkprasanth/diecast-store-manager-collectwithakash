@@ -440,3 +440,34 @@ def get_financial_details(start_date=None, end_date=None):
         return sales_df, purchases_df, expenses_df
     finally:
         conn.close()
+def get_invoiceable_sales():
+    """Retrieve existing sales for invoice generation without modifying data."""
+    conn = get_connection()
+    try:
+        rows = conn.execute("""
+            SELECT
+                o.id AS order_id,
+                o.order_date,
+                o.quantity,
+                o.unit_price,
+                c.brand,
+                c.model
+            FROM orders o
+            LEFT JOIN cars c ON c.id = o.car_id
+            WHERE o.unit_price IS NOT NULL
+            ORDER BY o.id DESC
+        """).fetchall()
+
+        return [
+            {
+                "order_id": row[0],
+                "order_date": row[1],
+                "quantity": row[2],
+                "unit_price": row[3],
+                "brand": row[4],
+                "model": row[5],
+            }
+            for row in rows
+        ]
+    finally:
+        conn.close()

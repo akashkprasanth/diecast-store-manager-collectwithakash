@@ -13,7 +13,10 @@ from business_features import (
     create_invoice,
     get_financial_summary,
     get_financial_details,
+    get_invoiceable_sales,
 )
+
+from invoice_generator import generate_invoice_pdf
 
 
 # Get inventory from the database
@@ -755,6 +758,103 @@ with st.expander("Financial Reports & Excel Export", expanded=False):
 
             except Exception as exc:
                 st.error(f"Could not prepare Excel report: {exc}")
+
+
+# =========================
+# INVOICE & RECEIPT GENERATION
+# =========================
+
+st.header("Invoice & Receipt Generation")
+
+with st.expander("Generate a PDF Invoice from an Existing Sale", expanded=False):
+    invoice_sales = get_invoiceable_sales()
+
+    if not invoice_sales:
+        st.info("No recorded sales are available for invoicing yet.")
+    else:
+        sale_options = {
+            (
+                f"Order #{row['order_id']} | "
+                f"{row['brand'] or 'Unknown Brand'} "
+                f"{row['model'] or ''} | "
+                f"{row['order_date']} | "
+                f"Qty: {row['quantity']} | "
+                f"INR {float(row['unit_price']):,.2f} each"
+            ): row
+            for row in invoice_sales
+        }
+
+        selected_sale_label = st.selectbox(
+            "Select an existing sale",
+            options=list(sale_options.keys()),
+            key="invoice_existing_sale",
+        )
+        selected_sale = sale_options[selected_sale_label]
+
+        st.write(
+            f"**Car:** {selected_sale['brand'] or 'Unknown Brand'} "
+            f"{selected_sale['model'] or ''}"
+        )
+        st.write(f"**Order date:** {selected_sale['order_date']}")
+        st.write(f"**Quantity:** {selected_sale['quantity']}")
+        st.write(
+            f"**Unit price:** INR {float(selected_sale['unit_price']):,.2f}"
+        )
+        st.write(
+            "**Sale total:** "
+            f"INR {int(selected_sale['quantity']) * float(selected_sale['unit_price']):,.2f}"
+        )
+
+        with st.form("invoice_customer_form"):
+            st.subheader("Customer Details (Optional)")
+            customer_name = st.text_input("Customer name")
+            customer_phone = st.text_input("Phone number")
+            customer_email = st.text_input("Email address")
+            customer_address = st.text_area("Billing address")
+
+            generate_invoice = st.form_submit_button("Generate PDF Invoice")
+
+        if generate_invoice:
+            try:
+                from datetime import date
+                import re
+
+                order_id = int(selected_sale["order_id"])
+                invoice_number = f"CWA-{date.today():%Y%m%d}-{order_id:06d}"
+
+                pdf_bytes = generate_invoice_pdf(
+                    invoice_number=invoice_number,
+                    invoice_date=date.today().isoformat(),
+                    customer_name=customer_name.strip(),
+                    customer_phone=customer_phone.strip(),
+                    customer_email=customer_email.strip(),
+                    customer_address=customer_address.strip(),
+                    car_brand=selected_sale["brand"] or "Diecast",
+                    car_model=selected_sale["model"] or "Model",
+                    quantity=selected_sale["quantity"],
+                    unit_price=selected_sale["unit_price"],
+                )
+
+                safe_invoice_number = re.sub(
+                    r"[^A-Za-z0-9_-]", "_", invoice_number
+                )
+
+                st.success(f"PDF invoice {invoice_number} generated.")
+                st.download_button(
+                    "Download PDF Invoice",
+                    data=pdf_bytes,
+                    file_name=f"{safe_invoice_number}.pdf",
+                    mime="application/pdf",
+                    key=f"download_invoice_{order_id}",
+                )
+
+                st.caption(
+                    "This PDF is generated from the selected existing sale. "
+                    "No sale, stock, or database invoice record was created."
+                )
+            except Exception as exc:
+                st.error(f"Could not generate invoice: {exc}")
+
 
 st.subheader("Search Inventory")
 
