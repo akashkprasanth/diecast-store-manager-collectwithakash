@@ -4,6 +4,16 @@ from db import get_connection, add_car, log_order, calculate_inventory_value, re
 from inventory_management import update_car, delete_car
 from sales_analytics import get_sales_analytics
 from best_sellers import get_best_sellers
+from business_features import (
+    init_business_tables,
+    add_supplier,
+    add_expense,
+    get_expenses,
+    get_supplier_spending,
+    create_invoice,
+    get_financial_summary,
+    get_financial_details,
+)
 
 
 # Get inventory from the database
@@ -21,6 +31,7 @@ def get_inventory():
 # Dashboard title
 # Ensure the stock purchases table exists.
 init_purchases_table()
+init_business_tables()
 
 st.title("CollectWithAkash - Diecast Store Manager")
 
@@ -373,6 +384,377 @@ if purchase_history:
     )
 else:
     st.info("No stock purchases have been recorded yet.")
+
+
+# Business Management
+st.divider()
+st.header("Business Management")
+
+supplier_tab, expense_tab, expense_report_tab = st.tabs([
+    "Suppliers",
+    "Expenses",
+    "Expense Summary"
+])
+
+with supplier_tab:
+    st.subheader("Add Supplier")
+
+    with st.form("add_supplier_form"):
+        supplier_name = st.text_input("Supplier name")
+        supplier_phone = st.text_input("Phone number")
+        supplier_email = st.text_input("Email address")
+        supplier_address = st.text_area("Address")
+        supplier_notes = st.text_area("Supplier notes")
+
+        supplier_submitted = st.form_submit_button("Add Supplier")
+
+    if supplier_submitted:
+        try:
+            supplier_id = add_supplier(
+                supplier_name,
+                supplier_phone,
+                supplier_email,
+                supplier_address,
+                supplier_notes
+            )
+            st.success(f"Supplier added successfully. ID: {supplier_id}")
+            st.rerun()
+        except (ValueError, TypeError) as error:
+            st.error(str(error))
+
+    with get_connection() as connection:
+        suppliers = connection.execute("""
+            SELECT id, name, phone, email, address, notes
+            FROM suppliers
+            ORDER BY name
+        """).fetchall()
+
+    st.subheader("Supplier Directory")
+
+    if suppliers:
+        st.dataframe(
+            pd.DataFrame(
+                [tuple(row) for row in suppliers],
+                columns=[
+                    "ID", "Supplier", "Phone", "Email", "Address", "Notes"
+                ]
+            ),
+            use_container_width=True,
+            hide_index=True
+        )
+    else:
+        st.info("No suppliers have been added yet.")
+
+    st.subheader("Historical Purchase Spending")
+
+    supplier_spending = get_supplier_spending()
+
+    if supplier_spending:
+        spending_df = pd.DataFrame(
+            supplier_spending,
+            columns=["Supplier", "Purchase Count", "Total Spending"]
+        )
+        spending_df["Total Spending"] = spending_df["Total Spending"].map(
+            lambda amount: f"INR {amount:,.2f}"
+        )
+        st.dataframe(
+            spending_df,
+            use_container_width=True,
+            hide_index=True
+        )
+    else:
+        st.info("No purchase spending is available.")
+
+with expense_tab:
+    st.subheader("Record Business Expense")
+
+    with st.form("add_expense_form"):
+        expense_date = st.date_input("Expense date")
+        expense_category = st.selectbox(
+            "Category",
+            [
+                "Packaging",
+                "Shipping",
+                "Advertising",
+                "Storage",
+                "Utilities",
+                "Office Supplies",
+                "Other"
+            ]
+        )
+        expense_description = st.text_input("Description")
+        expense_amount = st.number_input(
+            "Amount (INR)",
+            min_value=0.0,
+            value=0.0,
+            step=10.0,
+            format="%.2f"
+        )
+        expense_payment_method = st.selectbox(
+            "Payment method",
+            ["Cash", "Bank Transfer", "UPI", "Card", "Other"]
+        )
+        expense_notes = st.text_area("Notes (optional)")
+
+        expense_submitted = st.form_submit_button("Save Expense")
+
+    if expense_submitted:
+        try:
+            expense_id = add_expense(
+                expense_date,
+                expense_category,
+                expense_description,
+                expense_amount,
+                expense_payment_method,
+                expense_notes
+            )
+            st.success(f"Expense recorded successfully. ID: {expense_id}")
+            st.rerun()
+        except (ValueError, TypeError) as error:
+            st.error(str(error))
+
+    st.subheader("Expense History")
+
+    expense_rows = get_expenses()
+
+    if expense_rows:
+        expense_df = pd.DataFrame(
+            [tuple(row) for row in expense_rows],
+            columns=[
+                "ID", "Date", "Category", "Description",
+                "Amount (INR)", "Payment Method", "Notes"
+            ]
+        )
+        st.dataframe(
+            expense_df,
+            use_container_width=True,
+            hide_index=True
+        )
+    else:
+        st.info("No business expenses have been recorded yet.")
+
+with expense_report_tab:
+    st.subheader("Expense Summary")
+
+    expense_rows = get_expenses()
+
+    if expense_rows:
+        summary_df = pd.DataFrame(
+            [tuple(row) for row in expense_rows],
+            columns=[
+                "ID", "Date", "Category", "Description",
+                "Amount", "Payment Method", "Notes"
+            ]
+        )
+
+        total_expenses = float(summary_df["Amount"].sum())
+        st.metric("Total Recorded Expenses", f"INR {total_expenses:,.2f}")
+
+        category_summary = (
+            summary_df.groupby("Category", as_index=False)["Amount"]
+            .sum()
+            .sort_values("Amount", ascending=False)
+        )
+
+        st.dataframe(
+            category_summary,
+            use_container_width=True,
+            hide_index=True
+        )
+    else:
+        st.info("Record expenses to see a summary by category.")
+
+# =========================
+# FINANCIAL REPORTS
+# =========================
+
+st.header("Financial Reports")
+
+with st.expander("Financial Reports & Excel Export", expanded=False):
+    from datetime import date
+    from io import BytesIO
+    import pandas as pd
+
+    report_col1, report_col2 = st.columns(2)
+
+    with report_col1:
+        report_start_date = st.date_input(
+            "Report Start Date",
+            value=date(date.today().year, 1, 1),
+            key="financial_report_start",
+        )
+
+    with report_col2:
+        report_end_date = st.date_input(
+            "Report End Date",
+            value=date.today(),
+            key="financial_report_end",
+        )
+
+    if report_start_date > report_end_date:
+        st.error("Start date must be on or before the end date.")
+    else:
+        financial_data = get_financial_summary(
+            report_start_date,
+            report_end_date,
+        )
+
+        st.subheader("Profit & Loss Summary")
+
+        metric1, metric2, metric3 = st.columns(3)
+
+        metric1.metric(
+            "Sales Revenue",
+            f"INR {financial_data['total_revenue']:,.2f}",
+        )
+        metric2.metric(
+            "Cost of Goods Sold",
+            f"INR {financial_data['total_cogs']:,.2f}",
+        )
+        metric3.metric(
+            "Gross Profit",
+            f"INR {financial_data['gross_profit']:,.2f}",
+        )
+
+        metric4, metric5, metric6 = st.columns(3)
+
+        metric4.metric(
+            "Operating Expenses",
+            f"INR {financial_data['operating_expenses']:,.2f}",
+        )
+        metric5.metric(
+            "Net Operating Profit",
+            f"INR {financial_data['net_operating_profit']:,.2f}",
+        )
+        metric6.metric(
+            "Units Sold",
+            financial_data["units_sold"],
+        )
+
+        st.caption(
+            f"Recorded orders: {financial_data['total_orders']}. "
+            "Profit calculations use historical sale prices and costs. "
+            "Stock purchases are reported separately and are not "
+            "subtracted again from profit."
+        )
+
+        sales_df, purchases_df, expenses_df = get_financial_details(
+            report_start_date,
+            report_end_date,
+        )
+
+        st.subheader("Stock Purchase Summary")
+
+        if purchases_df.empty:
+            st.info("No stock purchases found for this date range.")
+        else:
+            purchase_total = purchases_df["purchase_total"].fillna(0).sum()
+            st.metric(
+                "Total Stock Purchases",
+                f"INR {purchase_total:,.2f}",
+            )
+            st.dataframe(purchases_df, use_container_width=True)
+
+        st.subheader("Sales Details")
+        if sales_df.empty:
+            st.info("No sales found for this date range.")
+        else:
+            st.dataframe(sales_df, use_container_width=True)
+
+        st.subheader("Operating Expense Details")
+        if expenses_df.empty:
+            st.info("No operating expenses found for this date range.")
+        else:
+            st.dataframe(expenses_df, use_container_width=True)
+
+        st.subheader("Export Reports to Excel")
+
+        if st.button("Prepare Excel Report", key="prepare_financial_excel"):
+            try:
+                excel_buffer = BytesIO()
+
+                summary_df = pd.DataFrame(
+                    [
+                        {
+                            "Metric": "Sales Revenue",
+                            "Amount (INR)": financial_data["total_revenue"],
+                        },
+                        {
+                            "Metric": "Cost of Goods Sold",
+                            "Amount (INR)": financial_data["total_cogs"],
+                        },
+                        {
+                            "Metric": "Gross Profit",
+                            "Amount (INR)": financial_data["gross_profit"],
+                        },
+                        {
+                            "Metric": "Operating Expenses",
+                            "Amount (INR)": financial_data["operating_expenses"],
+                        },
+                        {
+                            "Metric": "Net Operating Profit",
+                            "Amount (INR)": financial_data[
+                                "net_operating_profit"
+                            ],
+                        },
+                        {
+                            "Metric": "Units Sold",
+                            "Amount (INR)": financial_data["units_sold"],
+                        },
+                        {
+                            "Metric": "Total Stock Purchases (separate)",
+                            "Amount (INR)": (
+                                purchases_df["purchase_total"].fillna(0).sum()
+                                if not purchases_df.empty
+                                else 0
+                            ),
+                        },
+                    ]
+                )
+
+                with pd.ExcelWriter(
+                    excel_buffer,
+                    engine="openpyxl",
+                ) as writer:
+                    summary_df.to_excel(
+                        writer,
+                        sheet_name="Financial Summary",
+                        index=False,
+                    )
+                    sales_df.to_excel(
+                        writer,
+                        sheet_name="Sales",
+                        index=False,
+                    )
+                    purchases_df.to_excel(
+                        writer,
+                        sheet_name="Stock Purchases",
+                        index=False,
+                    )
+                    expenses_df.to_excel(
+                        writer,
+                        sheet_name="Operating Expenses",
+                        index=False,
+                    )
+
+                excel_buffer.seek(0)
+
+                st.download_button(
+                    label="Download Excel Report",
+                    data=excel_buffer.getvalue(),
+                    file_name=(
+                        f"CollectWithAkash_Financial_Report_"
+                        f"{report_start_date}_{report_end_date}.xlsx"
+                    ),
+                    mime=(
+                        "application/vnd.openxmlformats-officedocument."
+                        "spreadsheetml.sheet"
+                    ),
+                    key="download_financial_excel",
+                )
+
+            except Exception as exc:
+                st.error(f"Could not prepare Excel report: {exc}")
 
 st.subheader("Search Inventory")
 
