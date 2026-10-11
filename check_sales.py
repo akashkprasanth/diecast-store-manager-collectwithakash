@@ -1,26 +1,22 @@
 from db import get_connection
 
-connection = get_connection()
-cursor = connection.cursor()
 
-cursor.execute("""
-    SELECT
-        id,
-        car_id,
-        quantity,
-        source,
-        city,
-        order_date,
-        unit_price,
-        unit_cost
-    FROM orders
-""")
+def get_sales_analytics():
+    connection = get_connection()
+    cursor = connection.cursor()
 
-sales = cursor.fetchall()
+    cursor.execute("""
+        SELECT
+            COALESCE(SUM(quantity * unit_price), 0),
+            COALESCE(SUM(quantity * unit_cost), 0),
+            COALESCE(SUM(quantity * (unit_price - unit_cost)), 0)
+        FROM orders
+        WHERE unit_price IS NOT NULL
+          AND unit_cost IS NOT NULL
+    """)
 
-print("\n===== SALES RECORDS =====")
+    revenue, cost, profit = cursor.fetchone()
 
-for sale in sales:
-    print(sale)
+    connection.close()
 
-connection.close()
+    return revenue, cost, profit

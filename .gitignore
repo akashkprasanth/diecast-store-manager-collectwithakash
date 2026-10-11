@@ -1,15 +1,23 @@
-# Python virtual environment
-.venv/
-
-# Python cache files
+﻿.venv/
+venv/
 __pycache__/
 *.py[cod]
 
-# Environment variables and secrets
+# Local databases and backups
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# Secrets and environment files
 .env
+.env.*
+!.env.example
 
-# IDE settings
+# Editor files and logs
+.vscode/
 .idea/
+*.log
 
-# Local database
-diecast_store.db
+# Local application backups
+app_backup*.py
