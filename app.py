@@ -1,1004 +1,571 @@
-import streamlit as st
+import re
+from datetime import date, timedelta
+from io import BytesIO
+
 import pandas as pd
-from db import get_connection, add_car, log_order, calculate_inventory_value, record_purchase, init_purchases_table
+import streamlit as st
+
+from db import (
+    get_connection, add_car, log_order, calculate_inventory_value,
+    record_purchase, init_purchases_table,
+)
 from inventory_management import update_car, delete_car
 from sales_analytics import get_sales_analytics
 from best_sellers import get_best_sellers
 from business_features import (
-    init_business_tables,
-    add_supplier,
-    add_expense,
-    get_expenses,
-    get_supplier_spending,
-    create_invoice,
-    get_financial_summary,
-    get_financial_details,
+    init_business_tables, add_supplier, add_expense, get_expenses,
+    get_supplier_spending, get_financial_summary, get_financial_details,
     get_invoiceable_sales,
 )
-
 from invoice_generator import generate_invoice_pdf
 
-
-# Get inventory from the database
-def get_inventory():
-    connection = get_connection()
-    cursor = connection.cursor()
-
-    cursor.execute("SELECT * FROM cars")
-    cars = cursor.fetchall()
-
-    connection.close()
-    return cars
-
-
-# Dashboard title
-# Ensure the stock purchases table exists.
+st.set_page_config(page_title="Diecast Store Manager", page_icon="🏎️",
+                   layout="wide", initial_sidebar_state="expanded")
 init_purchases_table()
 init_business_tables()
+import web_orders as wo
+wo.init_web_tables()
 
-st.title("CollectWithAkash - Diecast Store Manager")
+BRANDS = ["Hot Wheels", "Mini GT", "Majorette", "Matchbox", "Other"]
+SOURCES = ["Instagram", "Telegram", "Website", "Other"]
+CONDITIONS = ["New", "Used"]
+EXPENSE_CATS = ["Packaging", "Shipping", "Advertising", "Storage", "Utilities", "Office Supplies", "Other"]
+PAYMENTS = ["Cash", "Bank Transfer", "UPI", "Card", "Other"]
+RS = "\u20b9{:,.2f}"
 
-st.write("Manage your diecast inventory, sales, and profits in one place.")
-
-
-# Low-Stock Alerts
-st.header("Low-Stock Alerts")
-
-low_stock_threshold = st.number_input(
-    "Alert when stock is at or below",
-    min_value=0,
-    max_value=100,
-    value=3,
-    step=1,
-    key="low_stock_threshold",
-)
-
-low_stock_connection = get_connection()
-try:
-    low_stock_cursor = low_stock_connection.cursor()
-    low_stock_cursor.execute("""
-        SELECT id, brand, model, stock
-        FROM cars
-        WHERE stock <= ?
-        ORDER BY stock ASC, brand ASC, model ASC
-    """, (int(low_stock_threshold),))
-    low_stock_cars = low_stock_cursor.fetchall()
-finally:
-    low_stock_connection.close()
-
-if low_stock_cars:
-    low_stock_df = pd.DataFrame(
-        low_stock_cars,
-        columns=["ID", "Brand", "Model", "Units Remaining"],
-    )
-    st.warning(f"{len(low_stock_cars)} car model(s) need attention.")
-    st.dataframe(low_stock_df, use_container_width=True, hide_index=True)
-else:
-    st.success("No low-stock alerts. Your inventory is above the selected threshold.")
-
-# Stock Overview
-st.header("Stock Overview")
-
-inventory_connection = get_connection()
-try:
-    inventory_cursor = inventory_connection.cursor()
-    inventory_cursor.execute("""
-        SELECT COUNT(*), COALESCE(SUM(stock), 0)
-        FROM cars
-    """)
-    total_models, total_units = inventory_cursor.fetchone()
-finally:
-    inventory_connection.close()
-
-inventory_cost, potential_sales, potential_profit = calculate_inventory_value()
-
-metric1, metric2, metric3, metric4 = st.columns(4)
-metric1.metric("Total Car Models", f"{total_models:,}")
-metric2.metric("Total Units in Stock", f"{total_units:,}")
-metric3.metric("Inventory Cost Value", f"\u20b9{inventory_cost:,.2f}")
-metric4.metric("Potential Sales Value", f"\u20b9{potential_sales:,.2f}")
-
-st.caption(f"Potential gross profit on current stock: \u20b9{potential_profit:,.2f}")
+# ---------- Style ----------
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Condensed:wght@600;700&display=swap');
+:root { --asphalt:#1B1F24; --line:#DADDE1; --paper:#F2F3F5; --yellow:#FFC400; --red:#D7263D; --green:#1E8E5A; }
+html, body, [class*="css"] { font-family:'Barlow',sans-serif; }
+.stApp { background:var(--paper); }
+h1,h2,h3 { font-family:'Barlow Condensed',sans-serif !important; color:var(--asphalt); }
+h1 { font-size:2.8rem !important; margin-bottom:0; }
+section[data-testid="stSidebar"] { background:var(--asphalt); }
+section[data-testid="stSidebar"] * { color:#E8EAED !important; }
+section[data-testid="stSidebar"] .stRadio label { padding:.35rem .2rem; font-size:1.05rem; }
+.brand { font-family:'Barlow Condensed'; font-size:1.8rem; font-weight:700; color:var(--yellow) !important; }
+.kpi { background:#fff; border:1px solid var(--line); border-top:4px solid var(--asphalt); border-radius:6px; padding:14px 16px; }
+.kpi.y { border-top-color:var(--yellow); } .kpi.g { border-top-color:var(--green); } .kpi.r { border-top-color:var(--red); }
+.kpi .l { color:#5B636D; font-size:.9rem; }
+.kpi .v { font-family:'Barlow Condensed'; font-size:2.1rem; font-weight:700; color:var(--asphalt); line-height:1.1; }
+.kpi .s { color:#5B636D; font-size:.82rem; }
+div[data-testid="stForm"] { background:#fff; border:1px solid var(--line); border-radius:6px; }
+.stButton>button, .stFormSubmitButton>button, .stDownloadButton>button { background:var(--asphalt); color:#fff; border:0; border-radius:4px; font-weight:600; }
+.stButton>button:hover, .stFormSubmitButton>button:hover, .stDownloadButton>button:hover { background:var(--yellow); color:var(--asphalt); }
+#MainMenu, footer { visibility:hidden; }
+</style>
+""", unsafe_allow_html=True)
 
 
-# Sidebar
-st.sidebar.title("Navigation")
-st.sidebar.write("Select a section to manage your store.")
-
-# Retrieve inventory ONCE
-cars = get_inventory()
+# ---------- Helpers ----------
+def kpi(label, value, sub="", tone=""):
+    st.markdown(f'<div class="kpi {tone}"><div class="l">{label}</div><div class="v">{value}</div>'
+                f'<div class="s">{sub or "&nbsp;"}</div></div>', unsafe_allow_html=True)
 
 
-# Sales Analytics
-st.header("Sales Analytics")
+def get_inventory():
+    conn = get_connection()
+    try:
+        return conn.execute("SELECT * FROM cars").fetchall()
+    finally:
+        conn.close()
 
-revenue, cost, profit = get_sales_analytics()
 
-col1, col2, col3 = st.columns(3)
+def low_stock(threshold):
+    conn = get_connection()
+    try:
+        return conn.execute(
+            "SELECT id, brand, model, stock FROM cars WHERE stock <= ? ORDER BY stock, brand, model",
+            (int(threshold),)).fetchall()
+    finally:
+        conn.close()
 
-col1.metric("Total Revenue", f"₹{revenue:,.2f}")
-col2.metric("Total Cost", f"₹{cost:,.2f}")
-col3.metric("Gross Profit", f"₹{profit:,.2f}")
 
-# Best-Selling Cars
-st.header("Best-Selling Cars")
+CAR_COLS = ["ID", "Brand", "Model", "Selling Price", "Cost Price", "Stock", "Condition", "Notes"]
 
-best_sellers = get_best_sellers()
 
-if best_sellers:
-    import pandas as pd
+# ---------- Pages ----------
+def page_dashboard():
+    cars = get_inventory()
+    st.title("Dashboard")
+    st.caption("Your stock, sales and profit at a glance.")
 
-    best_sellers_df = pd.DataFrame(
-        best_sellers,
-        columns=["Brand", "Model", "Units Sold"]
-    )
+    # ---- Period filter ----
+    today = date.today()
+    period = st.radio("Period", ["This month", "Last 30 days", "This year", "All time"],
+                      horizontal=True, label_visibility="collapsed", key="dash_period")
+    start = {"This month": today.replace(day=1), "Last 30 days": today - timedelta(days=30),
+             "This year": date(today.year, 1, 1), "All time": date(2000, 1, 1)}[period]
+    f = get_financial_summary(start, today)
+    revenue, gross = f["total_revenue"], f["gross_profit"]
+    expenses, net = f["operating_expenses"], f["net_operating_profit"]
+    margin = (gross / revenue * 100) if revenue else 0
 
-    st.dataframe(
-        best_sellers_df,
-        hide_index=True,
-        width="stretch"
-    )
-else:
-    st.info("No sales recorded yet.")
+    c = st.columns(4)
+    with c[0]: kpi("Revenue", RS.format(revenue), f"{f['units_sold']} units · {f['total_orders']} orders", "y")
+    with c[1]: kpi("Gross profit", RS.format(gross), f"Margin {margin:.1f}%", "g" if gross >= 0 else "r")
+    with c[2]: kpi("Expenses", RS.format(expenses), "Packaging, shipping, ads and more", "r")
+    with c[3]: kpi("Net profit", RS.format(net), "Gross profit minus expenses", "g" if net >= 0 else "r")
 
-# Inventory summary
-st.subheader("Inventory Overview")
+    st.write("")
+    inv_cost, pot_sales, pot_profit = calculate_inventory_value()
+    units = sum(c[5] for c in cars)
+    c = st.columns(4)
+    with c[0]: kpi("Units in stock", f"{units:,}", f"{len(cars)} models")
+    with c[1]: kpi("Inventory cost value", RS.format(inv_cost), "What your stock cost")
+    with c[2]: kpi("Potential sales value", RS.format(pot_sales), "If everything sells")
+    with c[3]: kpi("Potential profit", RS.format(pot_profit), "On current stock", "g")
 
-if cars:
-    total_cars = len(cars)
-    total_stock = sum(car[5] for car in cars)
-    inventory_value = sum(car[4] * car[5] for car in cars)
+    # ---- Sales rows (date trimmed to YYYY-MM-DD) ----
+    rows = get_invoiceable_sales()
+    sales = pd.DataFrame([{
+        "id": r["order_id"], "date": str(r["order_date"])[:10],
+        "brand": r["brand"] or "", "model": r["model"] or "",
+        "qty": int(r["quantity"]), "price": float(r["unit_price"]),
+    } for r in rows]) if rows else pd.DataFrame(columns=["id", "date", "brand", "model", "qty", "price"])
+    if not sales.empty:
+        sales["revenue"] = sales.qty * sales.price
+        in_range = sales[(sales.date >= str(start)) & (sales.date <= str(today))]
+    else:
+        in_range = sales
 
-    col1, col2, col3 = st.columns(3)
-
-    col1.metric("Total Car Records", total_cars)
-    col2.metric("Total Stock", total_stock)
-    col3.metric("Inventory Cost Value", f"₹{inventory_value:.2f}")
-else:
-    st.info("Your inventory is empty.")
-
-# Add a new car
-st.header("Add New Car")
-
-with st.form("add_car_form"):
-    brand = st.selectbox(
-        "Brand",
-        ["Hot Wheels", "Mini GT", "Majorette", "Matchbox", "Other"]
-    )
-
-    model = st.text_input("Car Model")
-
-    price = st.number_input(
-        "Selling Price (₹)",
-        min_value=0.0,
-        step=1.0
-    )
-
-    cost = st.number_input(
-        "Cost Price (₹)",
-        min_value=0.0,
-        step=1.0
-    )
-
-    stock = st.number_input(
-        "Stock Quantity",
-        min_value=0,
-        step=1
-    )
-
-    condition = st.selectbox(
-        "Condition",
-        ["New", "Used"]
-    )
-
-    submitted = st.form_submit_button("Add Car")
-
-    if submitted:
-        if not model.strip():
-            st.error("Please enter the car model.")
-
-        elif price <= 0:
-            st.error("Selling price must be greater than zero.")
-
-        elif cost < 0:
-            st.error("Cost price cannot be negative.")
-
+    st.write("")
+    left, right = st.columns([3, 2])
+    with left:
+        st.subheader("Revenue by day")
+        if in_range.empty:
+            st.info("No sales in this period.")
         else:
-            try:
-                add_car(
-                    brand,
-                    model.strip(),
-                    price,
-                    cost,
-                    stock,
-                    condition
-                )
+            st.bar_chart(in_range.groupby("date").revenue.sum(), color="#FFC400")
+    with right:
+        st.subheader("Needs restocking")
+        limit = st.number_input("Alert at or below", 0, 100, 3, key="low_stock_threshold")
+        low = low_stock(limit)
+        if low:
+            st.warning(f"{len(low)} model(s) need attention.")
+            st.dataframe(pd.DataFrame(low, columns=["ID", "Brand", "Model", "Left"]),
+                         hide_index=True, width="stretch")
+        else:
+            st.success("Nothing is running low.")
 
-                st.success(f"{model} added successfully!")
-                st.rerun()
+    a, b = st.columns(2)
+    with a:
+        st.subheader("Recent sales")
+        if sales.empty:
+            st.info("No sales recorded yet.")
+        else:
+            recent = sales.sort_values("id", ascending=False).head(5)
+            st.dataframe(pd.DataFrame({
+                "Date": recent.date, "Car": (recent.brand + " " + recent.model).str.strip(),
+                "Qty": recent.qty, "Total ₹": recent.revenue}),
+                hide_index=True, width="stretch")
+    with b:
+        st.subheader("Best sellers")
+        best = get_best_sellers()
+        if best:
+            st.dataframe(pd.DataFrame(best, columns=["Brand", "Model", "Units Sold"]),
+                         hide_index=True, width="stretch")
+        else:
+            st.info("Best sellers appear after your first sale.")
 
-            except Exception as e:
-                st.error(f"Could not add car: {e}")
+    a, b = st.columns(2)
+    with a:
+        st.subheader("Stock by brand")
+        if cars:
+            by_brand = pd.DataFrame(cars, columns=CAR_COLS).groupby("Brand").Stock.sum()
+            st.bar_chart(by_brand, color="#1B1F24")
+        else:
+            st.info("Your inventory is empty.")
+    with b:
+        st.subheader("Not sold yet")
+        sold = set(zip(sales.brand, sales.model)) if not sales.empty else set()
+        idle = [(c[1], c[2], c[5]) for c in cars if c[5] > 0 and (c[1], c[2]) not in sold]
+        if idle:
+            st.dataframe(pd.DataFrame(idle, columns=["Brand", "Model", "In stock"]),
+                         hide_index=True, width="stretch")
+        else:
+            st.success("Every car in stock has sold at least once.")
 
-# Record a sale
-st.header("Record a Sale")
 
-if cars:
-    car_options = {
-        f"{car[1]} - {car[2]} (Stock: {car[5]})": car[0]
-        for car in cars
-        if car[5] > 0
-    }
+def page_inventory():
+    cars = get_inventory()
+    st.title("Inventory")
+    t1, t2, t3 = st.tabs(["All cars", "Add car", "Edit or delete"])
 
-    if car_options:
-        with st.form("record_sale_form"):
-            selected_car = st.selectbox(
-                "Select Car",
-                list(car_options.keys())
-            )
+    with t1:
+        term = st.text_input("Search", placeholder="Brand or model, e.g. Ferrari or Hot Wheels")
+        shown = [c for c in cars if term.lower() in c[1].lower() or term.lower() in c[2].lower()] if term else cars
+        if shown:
+            st.dataframe(pd.DataFrame(shown, columns=CAR_COLS), hide_index=True, width="stretch")
+        else:
+            st.info("No cars found.")
 
-            quantity = st.number_input(
-                "Quantity Sold",
-                min_value=1,
-                step=1
-            )
+    with t2:
+        with st.form("add_car_form", clear_on_submit=True):
+            c = st.columns(2)
+            brand = c[0].selectbox("Brand", BRANDS)
+            model = c[1].text_input("Car model")
+            c = st.columns(4)
+            price = c[0].number_input("Selling price (₹)", min_value=0.0, step=1.0)
+            cost = c[1].number_input("Cost price (₹)", min_value=0.0, step=1.0)
+            stock = c[2].number_input("Stock quantity", min_value=0, step=1)
+            condition = c[3].selectbox("Condition", CONDITIONS)
+            if st.form_submit_button("Add car"):
+                if not model.strip():
+                    st.error("Enter the car model.")
+                elif price <= 0:
+                    st.error("Selling price must be greater than zero.")
+                else:
+                    try:
+                        add_car(brand, model.strip(), price, cost, stock, condition)
+                        st.success(f"{model} added.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Could not add car: {e}")
 
-            source = st.selectbox(
-                "Order Source",
-                ["Instagram", "Telegram", "Website", "Other"]
-            )
-
-            city = st.text_input("Customer City")
-
-            submitted_sale = st.form_submit_button("Record Sale")
-
-            if submitted_sale:
+    with t3:
+        if not cars:
+            st.info("Add a car before managing inventory.")
+            return
+        opts = {f"ID {c[0]} - {c[1]} {c[2]}": c for c in cars}
+        car = opts[st.selectbox("Choose a car", list(opts), key="manage_car_select")]
+        with st.form("edit_car_form"):
+            c = st.columns(2)
+            brand = c[0].text_input("Brand", value=car[1])
+            model = c[1].text_input("Model", value=car[2])
+            c = st.columns(4)
+            price = c[0].number_input("Selling price (₹)", min_value=0.01, value=max(float(car[3]), 0.01), step=1.0)
+            cost = c[1].number_input("Cost price (₹)", min_value=0.0, value=max(float(car[4]), 0.0), step=1.0)
+            stock = c[2].number_input("Stock", min_value=0, value=max(int(car[5]), 0), step=1)
+            cond = c[3].selectbox("Condition", CONDITIONS, index=0 if car[6] == "New" else 1)
+            if st.form_submit_button("Save changes"):
                 try:
-                    car_id = car_options[selected_car]
-
-                    log_order(
-                        car_id,
-                        int(quantity),
-                        source,
-                        city.strip()
-                    )
-
-                    st.success("Sale recorded and stock updated!")
+                    update_car(car[0], brand, model, price, cost, int(stock), cond)
+                    st.success("Car updated.")
                     st.rerun()
+                except Exception as e:
+                    st.error(f"Could not update car: {e}")
+        with st.expander("Delete this car"):
+            st.warning("Cars with existing sales history cannot be deleted.")
+            ok = st.checkbox("I understand that deleting a car cannot be undone.", key="confirm_delete_car")
+            if st.button("Delete selected car"):
+                if not ok:
+                    st.warning("Tick the box to confirm.")
+                else:
+                    try:
+                        delete_car(car[0])
+                        st.success("Car deleted.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Could not delete car: {e}")
 
+
+def page_sales():
+    st.title("Sales")
+    cars = get_inventory()
+    opts = {f"{c[1]} - {c[2]} (Stock: {c[5]})": c[0] for c in cars if c[5] > 0}
+    if not cars:
+        st.info("Add a car before recording a sale.")
+    elif not opts:
+        st.info("No cars currently in stock.")
+    else:
+        with st.form("record_sale_form", clear_on_submit=True):
+            sel = st.selectbox("Car", list(opts))
+            c = st.columns(3)
+            qty = c[0].number_input("Quantity sold", min_value=1, step=1)
+            source = c[1].selectbox("Order source", SOURCES)
+            city = c[2].text_input("Customer city")
+            if st.form_submit_button("Record sale"):
+                try:
+                    log_order(opts[sel], int(qty), source, city.strip())
+                    st.success("Sale recorded and stock updated.")
+                    st.rerun()
                 except Exception as e:
                     st.error(f"Could not record sale: {e}")
+
+    st.subheader("Recent sales")
+    rows = get_invoiceable_sales()
+    if rows:
+        st.dataframe(pd.DataFrame([{
+            "Order": r["order_id"], "Date": r["order_date"],
+            "Car": f'{r["brand"] or ""} {r["model"] or ""}'.strip(),
+            "Qty": r["quantity"], "Unit price ₹": float(r["unit_price"]),
+        } for r in rows]), hide_index=True, width="stretch")
     else:
-        st.info("No cars currently in stock.")
-else:
-    st.info("Add a car before recording a sale.")
-
-# Search and filter inventory
-
-# Stock Purchases & Restocking
-st.divider()
-st.header("Stock Purchases & Restocking")
-st.write("Record new stock purchases and track your restocking costs.")
-
-connection = get_connection()
-try:
-    purchase_cars = connection.execute(
-        "SELECT id, brand, model, stock FROM cars ORDER BY brand, model"
-    ).fetchall()
-
-    purchase_history = connection.execute("""
-        SELECT
-            p.id AS Purchase_ID,
-            p.purchase_date AS Purchase_Date,
-            c.brand AS Brand,
-            c.model AS Model,
-            p.quantity AS Quantity,
-            p.unit_cost AS Unit_Cost,
-            p.quantity * p.unit_cost AS Total_Cost,
-            p.supplier AS Supplier,
-            p.notes AS Notes
-        FROM purchases p
-        JOIN cars c ON c.id = p.car_id
-        ORDER BY p.id DESC
-    """).fetchall()
-finally:
-    connection.close()
-
-if not purchase_cars:
-    st.info("Add a car to your inventory before recording a stock purchase.")
-else:
-    car_options = {
-        f"ID {car[0]} - {car[1]} {car[2]} (Current stock: {car[3]})": car[0]
-        for car in purchase_cars
-    }
-
-    with st.form("stock_purchase_form"):
-        selected_car = st.selectbox(
-            "Select diecast model",
-            options=list(car_options.keys())
-        )
-        purchase_quantity = st.number_input(
-            "Quantity purchased",
-            min_value=1,
-            value=1,
-            step=1
-        )
-        purchase_unit_cost = st.number_input(
-            "Cost per unit (\u20b9)",
-            min_value=0.0,
-            value=0.0,
-            step=10.0,
-            format="%.2f"
-        )
-        purchase_supplier = st.text_input("Supplier")
-        purchase_date = st.date_input("Purchase date")
-        purchase_notes = st.text_area("Notes (optional)")
-
-        purchase_submitted = st.form_submit_button(
-            "Record Purchase & Restock",
-            type="primary"
-        )
-
-    if purchase_submitted:
-        try:
-            purchase_id = record_purchase(
-                car_id=int(car_options[selected_car]),
-                quantity=int(purchase_quantity),
-                unit_cost=float(purchase_unit_cost),
-                supplier=purchase_supplier,
-                purchase_date=purchase_date,
-                notes=purchase_notes
-            )
-            st.success(
-                f"Purchase #{purchase_id} recorded. "
-                f"{int(purchase_quantity)} unit(s) added to inventory."
-            )
-            st.rerun()
-        except (ValueError, TypeError) as error:
-            st.error(str(error))
-        except Exception as error:
-            st.error(f"Could not record purchase: {error}")
-
-st.subheader("Purchase History")
-
-if purchase_history:
-    purchase_df = pd.DataFrame(
-        [tuple(row) for row in purchase_history],
-        columns=[
-            "Purchase ID",
-            "Date",
-            "Brand",
-            "Model",
-            "Quantity",
-            "Unit Cost (INR)",
-            "Total Cost (INR)",
-            "Supplier",
-            "Notes"
-        ]
-    )
-    st.dataframe(
-        purchase_df,
-        use_container_width=True,
-        hide_index=True
-    )
-    st.metric(
-        "Total Recorded Purchase Cost",
-        f"INR {purchase_df['Total Cost (INR)'].sum():,.2f}"
-    )
-else:
-    st.info("No stock purchases have been recorded yet.")
+        st.info("No sales recorded yet.")
 
 
-# Business Management
-st.divider()
-st.header("Business Management")
+def page_purchases():
+    st.title("Purchases")
+    st.caption("Record new stock and track restocking costs.")
+    conn = get_connection()
+    try:
+        pcars = conn.execute("SELECT id, brand, model, stock FROM cars ORDER BY brand, model").fetchall()
+        hist = conn.execute("""
+            SELECT p.id, p.purchase_date, c.brand, c.model, p.quantity, p.unit_cost,
+                   p.quantity * p.unit_cost, p.supplier, p.notes
+            FROM purchases p JOIN cars c ON c.id = p.car_id ORDER BY p.id DESC""").fetchall()
+    finally:
+        conn.close()
 
-supplier_tab, expense_tab, expense_report_tab = st.tabs([
-    "Suppliers",
-    "Expenses",
-    "Expense Summary"
-])
-
-with supplier_tab:
-    st.subheader("Add Supplier")
-
-    with st.form("add_supplier_form"):
-        supplier_name = st.text_input("Supplier name")
-        supplier_phone = st.text_input("Phone number")
-        supplier_email = st.text_input("Email address")
-        supplier_address = st.text_area("Address")
-        supplier_notes = st.text_area("Supplier notes")
-
-        supplier_submitted = st.form_submit_button("Add Supplier")
-
-    if supplier_submitted:
-        try:
-            supplier_id = add_supplier(
-                supplier_name,
-                supplier_phone,
-                supplier_email,
-                supplier_address,
-                supplier_notes
-            )
-            st.success(f"Supplier added successfully. ID: {supplier_id}")
-            st.rerun()
-        except (ValueError, TypeError) as error:
-            st.error(str(error))
-
-    with get_connection() as connection:
-        suppliers = connection.execute("""
-            SELECT id, name, phone, email, address, notes
-            FROM suppliers
-            ORDER BY name
-        """).fetchall()
-
-    st.subheader("Supplier Directory")
-
-    if suppliers:
-        st.dataframe(
-            pd.DataFrame(
-                [tuple(row) for row in suppliers],
-                columns=[
-                    "ID", "Supplier", "Phone", "Email", "Address", "Notes"
-                ]
-            ),
-            use_container_width=True,
-            hide_index=True
-        )
+    if not pcars:
+        st.info("Add a car to your inventory before recording a purchase.")
     else:
-        st.info("No suppliers have been added yet.")
+        opts = {f"ID {c[0]} - {c[1]} {c[2]} (Current stock: {c[3]})": c[0] for c in pcars}
+        with st.form("stock_purchase_form", clear_on_submit=True):
+            sel = st.selectbox("Diecast model", list(opts))
+            c = st.columns(4)
+            qty = c[0].number_input("Quantity", min_value=1, value=1, step=1)
+            unit = c[1].number_input("Cost per unit (₹)", min_value=0.0, step=10.0, format="%.2f")
+            supplier = c[2].text_input("Supplier")
+            when = c[3].date_input("Purchase date")
+            notes = st.text_area("Notes (optional)", height=70)
+            if st.form_submit_button("Record purchase and restock", type="primary"):
+                try:
+                    pid = record_purchase(car_id=int(opts[sel]), quantity=int(qty), unit_cost=float(unit),
+                                          supplier=supplier, purchase_date=when, notes=notes)
+                    st.success(f"Purchase #{pid} recorded. {int(qty)} unit(s) added to inventory.")
+                    st.rerun()
+                except (ValueError, TypeError) as e:
+                    st.error(str(e))
+                except Exception as e:
+                    st.error(f"Could not record purchase: {e}")
 
-    st.subheader("Historical Purchase Spending")
-
-    supplier_spending = get_supplier_spending()
-
-    if supplier_spending:
-        spending_df = pd.DataFrame(
-            supplier_spending,
-            columns=["Supplier", "Purchase Count", "Total Spending"]
-        )
-        spending_df["Total Spending"] = spending_df["Total Spending"].map(
-            lambda amount: f"INR {amount:,.2f}"
-        )
-        st.dataframe(
-            spending_df,
-            use_container_width=True,
-            hide_index=True
-        )
+    st.subheader("Purchase history")
+    if hist:
+        df = pd.DataFrame([tuple(r) for r in hist], columns=[
+            "Purchase ID", "Date", "Brand", "Model", "Quantity",
+            "Unit Cost (INR)", "Total Cost (INR)", "Supplier", "Notes"])
+        kpi("Total recorded purchase cost", f"INR {df['Total Cost (INR)'].sum():,.2f}", "", "y")
+        st.write("")
+        st.dataframe(df, hide_index=True, width="stretch")
     else:
-        st.info("No purchase spending is available.")
+        st.info("No stock purchases recorded yet.")
 
-with expense_tab:
-    st.subheader("Record Business Expense")
 
-    with st.form("add_expense_form"):
-        expense_date = st.date_input("Expense date")
-        expense_category = st.selectbox(
-            "Category",
-            [
-                "Packaging",
-                "Shipping",
-                "Advertising",
-                "Storage",
-                "Utilities",
-                "Office Supplies",
-                "Other"
-            ]
-        )
-        expense_description = st.text_input("Description")
-        expense_amount = st.number_input(
-            "Amount (INR)",
-            min_value=0.0,
-            value=0.0,
-            step=10.0,
-            format="%.2f"
-        )
-        expense_payment_method = st.selectbox(
-            "Payment method",
-            ["Cash", "Bank Transfer", "UPI", "Card", "Other"]
-        )
-        expense_notes = st.text_area("Notes (optional)")
+def page_business():
+    st.title("Suppliers and expenses")
+    t1, t2, t3 = st.tabs(["Suppliers", "Expenses", "Expense summary"])
 
-        expense_submitted = st.form_submit_button("Save Expense")
-
-    if expense_submitted:
-        try:
-            expense_id = add_expense(
-                expense_date,
-                expense_category,
-                expense_description,
-                expense_amount,
-                expense_payment_method,
-                expense_notes
-            )
-            st.success(f"Expense recorded successfully. ID: {expense_id}")
-            st.rerun()
-        except (ValueError, TypeError) as error:
-            st.error(str(error))
-
-    st.subheader("Expense History")
-
-    expense_rows = get_expenses()
-
-    if expense_rows:
-        expense_df = pd.DataFrame(
-            [tuple(row) for row in expense_rows],
-            columns=[
-                "ID", "Date", "Category", "Description",
-                "Amount (INR)", "Payment Method", "Notes"
-            ]
-        )
-        st.dataframe(
-            expense_df,
-            use_container_width=True,
-            hide_index=True
-        )
-    else:
-        st.info("No business expenses have been recorded yet.")
-
-with expense_report_tab:
-    st.subheader("Expense Summary")
-
-    expense_rows = get_expenses()
-
-    if expense_rows:
-        summary_df = pd.DataFrame(
-            [tuple(row) for row in expense_rows],
-            columns=[
-                "ID", "Date", "Category", "Description",
-                "Amount", "Payment Method", "Notes"
-            ]
-        )
-
-        total_expenses = float(summary_df["Amount"].sum())
-        st.metric("Total Recorded Expenses", f"INR {total_expenses:,.2f}")
-
-        category_summary = (
-            summary_df.groupby("Category", as_index=False)["Amount"]
-            .sum()
-            .sort_values("Amount", ascending=False)
-        )
-
-        st.dataframe(
-            category_summary,
-            use_container_width=True,
-            hide_index=True
-        )
-    else:
-        st.info("Record expenses to see a summary by category.")
-
-# =========================
-# FINANCIAL REPORTS
-# =========================
-
-st.header("Financial Reports")
-
-with st.expander("Financial Reports & Excel Export", expanded=False):
-    from datetime import date
-    from io import BytesIO
-    import pandas as pd
-
-    report_col1, report_col2 = st.columns(2)
-
-    with report_col1:
-        report_start_date = st.date_input(
-            "Report Start Date",
-            value=date(date.today().year, 1, 1),
-            key="financial_report_start",
-        )
-
-    with report_col2:
-        report_end_date = st.date_input(
-            "Report End Date",
-            value=date.today(),
-            key="financial_report_end",
-        )
-
-    if report_start_date > report_end_date:
-        st.error("Start date must be on or before the end date.")
-    else:
-        financial_data = get_financial_summary(
-            report_start_date,
-            report_end_date,
-        )
-
-        st.subheader("Profit & Loss Summary")
-
-        metric1, metric2, metric3 = st.columns(3)
-
-        metric1.metric(
-            "Sales Revenue",
-            f"INR {financial_data['total_revenue']:,.2f}",
-        )
-        metric2.metric(
-            "Cost of Goods Sold",
-            f"INR {financial_data['total_cogs']:,.2f}",
-        )
-        metric3.metric(
-            "Gross Profit",
-            f"INR {financial_data['gross_profit']:,.2f}",
-        )
-
-        metric4, metric5, metric6 = st.columns(3)
-
-        metric4.metric(
-            "Operating Expenses",
-            f"INR {financial_data['operating_expenses']:,.2f}",
-        )
-        metric5.metric(
-            "Net Operating Profit",
-            f"INR {financial_data['net_operating_profit']:,.2f}",
-        )
-        metric6.metric(
-            "Units Sold",
-            financial_data["units_sold"],
-        )
-
-        st.caption(
-            f"Recorded orders: {financial_data['total_orders']}. "
-            "Profit calculations use historical sale prices and costs. "
-            "Stock purchases are reported separately and are not "
-            "subtracted again from profit."
-        )
-
-        sales_df, purchases_df, expenses_df = get_financial_details(
-            report_start_date,
-            report_end_date,
-        )
-
-        st.subheader("Stock Purchase Summary")
-
-        if purchases_df.empty:
-            st.info("No stock purchases found for this date range.")
+    with t1:
+        with st.form("add_supplier_form", clear_on_submit=True):
+            c = st.columns(3)
+            name = c[0].text_input("Supplier name")
+            phone = c[1].text_input("Phone number")
+            email = c[2].text_input("Email address")
+            c = st.columns(2)
+            addr = c[0].text_area("Address", height=90)
+            notes = c[1].text_area("Supplier notes", height=90)
+            if st.form_submit_button("Add supplier"):
+                try:
+                    sid = add_supplier(name, phone, email, addr, notes)
+                    st.success(f"Supplier added. ID: {sid}")
+                    st.rerun()
+                except (ValueError, TypeError) as e:
+                    st.error(str(e))
+        with get_connection() as conn:
+            sups = conn.execute("SELECT id, name, phone, email, address, notes FROM suppliers ORDER BY name").fetchall()
+        st.subheader("Supplier directory")
+        if sups:
+            st.dataframe(pd.DataFrame([tuple(r) for r in sups],
+                         columns=["ID", "Supplier", "Phone", "Email", "Address", "Notes"]),
+                         hide_index=True, width="stretch")
         else:
-            purchase_total = purchases_df["purchase_total"].fillna(0).sum()
-            st.metric(
-                "Total Stock Purchases",
-                f"INR {purchase_total:,.2f}",
-            )
-            st.dataframe(purchases_df, use_container_width=True)
-
-        st.subheader("Sales Details")
-        if sales_df.empty:
-            st.info("No sales found for this date range.")
+            st.info("No suppliers added yet.")
+        st.subheader("Historical purchase spending")
+        sp = get_supplier_spending()
+        if sp:
+            df = pd.DataFrame(sp, columns=["Supplier", "Purchase Count", "Total Spending"])
+            df["Total Spending"] = df["Total Spending"].map(lambda a: f"INR {a:,.2f}")
+            st.dataframe(df, hide_index=True, width="stretch")
         else:
-            st.dataframe(sales_df, use_container_width=True)
+            st.info("No purchase spending available.")
 
-        st.subheader("Operating Expense Details")
-        if expenses_df.empty:
-            st.info("No operating expenses found for this date range.")
+    with t2:
+        with st.form("add_expense_form", clear_on_submit=True):
+            c = st.columns(3)
+            d = c[0].date_input("Expense date")
+            cat = c[1].selectbox("Category", EXPENSE_CATS)
+            pay = c[2].selectbox("Payment method", PAYMENTS)
+            c = st.columns(2)
+            desc = c[0].text_input("Description")
+            amt = c[1].number_input("Amount (INR)", min_value=0.0, step=10.0, format="%.2f")
+            notes = st.text_area("Notes (optional)", height=70)
+            if st.form_submit_button("Save expense"):
+                try:
+                    eid = add_expense(d, cat, desc, amt, pay, notes)
+                    st.success(f"Expense recorded. ID: {eid}")
+                    st.rerun()
+                except (ValueError, TypeError) as e:
+                    st.error(str(e))
+        st.subheader("Expense history")
+        rows = get_expenses()
+        if rows:
+            st.dataframe(pd.DataFrame([tuple(r) for r in rows], columns=[
+                "ID", "Date", "Category", "Description", "Amount (INR)", "Payment Method", "Notes"]),
+                hide_index=True, width="stretch")
         else:
-            st.dataframe(expenses_df, use_container_width=True)
+            st.info("No expenses recorded yet.")
 
-        st.subheader("Export Reports to Excel")
-
-        if st.button("Prepare Excel Report", key="prepare_financial_excel"):
-            try:
-                excel_buffer = BytesIO()
-
-                summary_df = pd.DataFrame(
-                    [
-                        {
-                            "Metric": "Sales Revenue",
-                            "Amount (INR)": financial_data["total_revenue"],
-                        },
-                        {
-                            "Metric": "Cost of Goods Sold",
-                            "Amount (INR)": financial_data["total_cogs"],
-                        },
-                        {
-                            "Metric": "Gross Profit",
-                            "Amount (INR)": financial_data["gross_profit"],
-                        },
-                        {
-                            "Metric": "Operating Expenses",
-                            "Amount (INR)": financial_data["operating_expenses"],
-                        },
-                        {
-                            "Metric": "Net Operating Profit",
-                            "Amount (INR)": financial_data[
-                                "net_operating_profit"
-                            ],
-                        },
-                        {
-                            "Metric": "Units Sold",
-                            "Amount (INR)": financial_data["units_sold"],
-                        },
-                        {
-                            "Metric": "Total Stock Purchases (separate)",
-                            "Amount (INR)": (
-                                purchases_df["purchase_total"].fillna(0).sum()
-                                if not purchases_df.empty
-                                else 0
-                            ),
-                        },
-                    ]
-                )
-
-                with pd.ExcelWriter(
-                    excel_buffer,
-                    engine="openpyxl",
-                ) as writer:
-                    summary_df.to_excel(
-                        writer,
-                        sheet_name="Financial Summary",
-                        index=False,
-                    )
-                    sales_df.to_excel(
-                        writer,
-                        sheet_name="Sales",
-                        index=False,
-                    )
-                    purchases_df.to_excel(
-                        writer,
-                        sheet_name="Stock Purchases",
-                        index=False,
-                    )
-                    expenses_df.to_excel(
-                        writer,
-                        sheet_name="Operating Expenses",
-                        index=False,
-                    )
-
-                excel_buffer.seek(0)
-
-                st.download_button(
-                    label="Download Excel Report",
-                    data=excel_buffer.getvalue(),
-                    file_name=(
-                        f"CollectWithAkash_Financial_Report_"
-                        f"{report_start_date}_{report_end_date}.xlsx"
-                    ),
-                    mime=(
-                        "application/vnd.openxmlformats-officedocument."
-                        "spreadsheetml.sheet"
-                    ),
-                    key="download_financial_excel",
-                )
-
-            except Exception as exc:
-                st.error(f"Could not prepare Excel report: {exc}")
+    with t3:
+        rows = get_expenses()
+        if rows:
+            df = pd.DataFrame([tuple(r) for r in rows], columns=[
+                "ID", "Date", "Category", "Description", "Amount", "Payment Method", "Notes"])
+            kpi("Total recorded expenses", f"INR {float(df['Amount'].sum()):,.2f}", "", "r")
+            st.write("")
+            by_cat = df.groupby("Category", as_index=False)["Amount"].sum().sort_values("Amount", ascending=False)
+            a, b = st.columns(2)
+            a.bar_chart(by_cat.set_index("Category"), color="#1B1F24")
+            b.dataframe(by_cat, hide_index=True, width="stretch")
+        else:
+            st.info("Record expenses to see a summary by category.")
 
 
-# =========================
-# INVOICE & RECEIPT GENERATION
-# =========================
+def page_reports():
+    st.title("Reports and invoices")
+    t1, t2 = st.tabs(["Financial report", "PDF invoice"])
 
-st.header("Invoice & Receipt Generation")
+    with t1:
+        c = st.columns(2)
+        start = c[0].date_input("Start date", value=date(date.today().year, 1, 1), key="financial_report_start")
+        end = c[1].date_input("End date", value=date.today(), key="financial_report_end")
+        if start > end:
+            st.error("Start date must be on or before the end date.")
+        else:
+            f = get_financial_summary(start, end)
+            sales_df, purchases_df, expenses_df = get_financial_details(start, end)
+            c = st.columns(3)
+            with c[0]: kpi("Sales revenue", f"INR {f['total_revenue']:,.2f}", "", "y")
+            with c[1]: kpi("Cost of goods sold", f"INR {f['total_cogs']:,.2f}")
+            with c[2]: kpi("Gross profit", f"INR {f['gross_profit']:,.2f}", "", "g")
+            st.write("")
+            c = st.columns(3)
+            with c[0]: kpi("Operating expenses", f"INR {f['operating_expenses']:,.2f}", "", "r")
+            with c[1]: kpi("Net operating profit", f"INR {f['net_operating_profit']:,.2f}", "", "g" if f["net_operating_profit"] >= 0 else "r")
+            with c[2]: kpi("Units sold", f"{f['units_sold']}", f"{f['total_orders']} orders")
+            st.caption("Profit uses historical sale prices and costs. Stock purchases are reported separately and not subtracted again.")
 
-with st.expander("Generate a PDF Invoice from an Existing Sale", expanded=False):
-    invoice_sales = get_invoiceable_sales()
+            purchase_total = purchases_df["purchase_total"].fillna(0).sum() if not purchases_df.empty else 0
+            for title, df, empty in [("Stock purchases", purchases_df, "No stock purchases in this range."),
+                                     ("Sales details", sales_df, "No sales in this range."),
+                                     ("Operating expenses", expenses_df, "No expenses in this range.")]:
+                with st.expander(title):
+                    st.dataframe(df, width="stretch") if not df.empty else st.info(empty)
 
-    if not invoice_sales:
-        st.info("No recorded sales are available for invoicing yet.")
-    else:
-        sale_options = {
-            (
-                f"Order #{row['order_id']} | "
-                f"{row['brand'] or 'Unknown Brand'} "
-                f"{row['model'] or ''} | "
-                f"{row['order_date']} | "
-                f"Qty: {row['quantity']} | "
-                f"INR {float(row['unit_price']):,.2f} each"
-            ): row
-            for row in invoice_sales
-        }
+            summary = pd.DataFrame([
+                ("Sales Revenue", f["total_revenue"]), ("Cost of Goods Sold", f["total_cogs"]),
+                ("Gross Profit", f["gross_profit"]), ("Operating Expenses", f["operating_expenses"]),
+                ("Net Operating Profit", f["net_operating_profit"]), ("Units Sold", f["units_sold"]),
+                ("Total Stock Purchases (separate)", purchase_total)], columns=["Metric", "Amount (INR)"])
+            buf = BytesIO()
+            with pd.ExcelWriter(buf, engine="openpyxl") as w:
+                summary.to_excel(w, sheet_name="Financial Summary", index=False)
+                sales_df.to_excel(w, sheet_name="Sales", index=False)
+                purchases_df.to_excel(w, sheet_name="Stock Purchases", index=False)
+                expenses_df.to_excel(w, sheet_name="Operating Expenses", index=False)
+            st.download_button("Download Excel report", buf.getvalue(),
+                               f"Financial_Report_{start}_{end}.xlsx",
+                               "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                               key="download_financial_excel")
 
-        selected_sale_label = st.selectbox(
-            "Select an existing sale",
-            options=list(sale_options.keys()),
-            key="invoice_existing_sale",
-        )
-        selected_sale = sale_options[selected_sale_label]
-
-        st.write(
-            f"**Car:** {selected_sale['brand'] or 'Unknown Brand'} "
-            f"{selected_sale['model'] or ''}"
-        )
-        st.write(f"**Order date:** {selected_sale['order_date']}")
-        st.write(f"**Quantity:** {selected_sale['quantity']}")
-        st.write(
-            f"**Unit price:** INR {float(selected_sale['unit_price']):,.2f}"
-        )
-        st.write(
-            "**Sale total:** "
-            f"INR {int(selected_sale['quantity']) * float(selected_sale['unit_price']):,.2f}"
-        )
-
+    with t2:
+        rows = get_invoiceable_sales()
+        if not rows:
+            st.info("No recorded sales are available for invoicing yet.")
+            return
+        opts = {f"Order #{r['order_id']} | {r['brand'] or 'Unknown Brand'} {r['model'] or ''} | "
+                f"{r['order_date']} | Qty: {r['quantity']} | INR {float(r['unit_price']):,.2f} each": r
+                for r in rows}
+        sale = opts[st.selectbox("Select a sale", list(opts), key="invoice_existing_sale")]
+        total = int(sale["quantity"]) * float(sale["unit_price"])
+        st.caption(f"{sale['brand'] or ''} {sale['model'] or ''} · {sale['order_date']} · "
+                   f"Qty {sale['quantity']} · Total INR {total:,.2f}")
         with st.form("invoice_customer_form"):
-            st.subheader("Customer Details (Optional)")
-            customer_name = st.text_input("Customer name")
-            customer_phone = st.text_input("Phone number")
-            customer_email = st.text_input("Email address")
-            customer_address = st.text_area("Billing address")
-
-            generate_invoice = st.form_submit_button("Generate PDF Invoice")
-
-        if generate_invoice:
+            st.subheader("Customer details (optional)")
+            c = st.columns(3)
+            name, phone, email = c[0].text_input("Customer name"), c[1].text_input("Phone"), c[2].text_input("Email")
+            addr = st.text_area("Billing address", height=80)
+            go = st.form_submit_button("Generate PDF invoice")
+        if go:
             try:
-                from datetime import date
-                import re
-
-                order_id = int(selected_sale["order_id"])
-                invoice_number = f"CWA-{date.today():%Y%m%d}-{order_id:06d}"
-
-                pdf_bytes = generate_invoice_pdf(
-                    invoice_number=invoice_number,
-                    invoice_date=date.today().isoformat(),
-                    customer_name=customer_name.strip(),
-                    customer_phone=customer_phone.strip(),
-                    customer_email=customer_email.strip(),
-                    customer_address=customer_address.strip(),
-                    car_brand=selected_sale["brand"] or "Diecast",
-                    car_model=selected_sale["model"] or "Model",
-                    quantity=selected_sale["quantity"],
-                    unit_price=selected_sale["unit_price"],
-                )
-
-                safe_invoice_number = re.sub(
-                    r"[^A-Za-z0-9_-]", "_", invoice_number
-                )
-
-                st.success(f"PDF invoice {invoice_number} generated.")
-                st.download_button(
-                    "Download PDF Invoice",
-                    data=pdf_bytes,
-                    file_name=f"{safe_invoice_number}.pdf",
-                    mime="application/pdf",
-                    key=f"download_invoice_{order_id}",
-                )
-
-                st.caption(
-                    "This PDF is generated from the selected existing sale. "
-                    "No sale, stock, or database invoice record was created."
-                )
-            except Exception as exc:
-                st.error(f"Could not generate invoice: {exc}")
+                oid = int(sale["order_id"])
+                number = f"CWA-{date.today():%Y%m%d}-{oid:06d}"
+                pdf = generate_invoice_pdf(
+                    invoice_number=number, invoice_date=date.today().isoformat(),
+                    customer_name=name.strip(), customer_phone=phone.strip(),
+                    customer_email=email.strip(), customer_address=addr.strip(),
+                    car_brand=sale["brand"] or "Diecast", car_model=sale["model"] or "Model",
+                    quantity=sale["quantity"], unit_price=sale["unit_price"])
+                st.success(f"Invoice {number} generated.")
+                st.download_button("Download PDF invoice", pdf,
+                                   f"{re.sub(r'[^A-Za-z0-9_-]', '_', number)}.pdf",
+                                   "application/pdf", key=f"download_invoice_{oid}")
+            except Exception as e:
+                st.error(f"Could not generate invoice: {e}")
 
 
-st.subheader("Search Inventory")
+# ---------- Website (storefront) ----------
+def page_website():
+    st.title("Website")
+    st.caption("Your storefront at collectwithakash.github.io. Changes here reach the site within seconds.")
+    t1, t2 = st.tabs([f"Orders ({wo.pending_count()} pending)", "Listings"])
 
-search_term = st.text_input(
-    "Search by brand or model",
-    placeholder="Example: Ferrari or Hot Wheels"
-)
+    with t1:
+        orders = wo.list_orders()
+        if not orders:
+            st.info("No website orders yet.")
+        for o in orders:
+            with st.container(border=True):
+                st.markdown(f"**Order #{o['id']}** · {o['created_at']} · **{o['status']}**")
+                st.write(f"{o['name']} · {o['phone']} · {o['city'] or 'No city'}")
+                st.write("; ".join(f"{i['qty']} × {i['brand']} {i['model']} @ {RS.format(i['price'])}" for i in o["items"])
+                         + f" — **Total {RS.format(o['total'])}**")
+                if o["status"] == "Pending":
+                    a, b, _ = st.columns([1, 1, 4])
+                    if a.button("Confirm sale", key=f"ok{o['id']}", type="primary"):
+                        try:
+                            wo.confirm_order(o["id"])
+                            st.rerun()
+                        except Exception as e:
+                            st.error(str(e))
+                    if b.button("Cancel", key=f"no{o['id']}"):
+                        wo.cancel_order(o["id"])
+                        st.rerun()
 
-if search_term:
-    filtered_cars = [
-        car for car in cars
-        if search_term.lower() in car[1].lower()
-        or search_term.lower() in car[2].lower()
-    ]
-else:
-    filtered_cars = cars
+    with t2:
+        cars = get_inventory()
+        if not cars:
+            st.info("Add a car in Inventory and it appears on the website automatically.")
+            return
+        opts = {f"ID {c[0]} - {c[1]} {c[2]}": c[0] for c in cars}
+        pick = opts[st.selectbox("Car", list(opts), key="web_car")]
+        scale, image, listed = wo.get_extras(pick)
+        with st.form(f"web_extras_{pick}"):
+            c = st.columns(2)
+            new_scale = c[0].text_input("Scale", value=scale)
+            show = c[1].checkbox("Show on website", value=listed)
+            pic = st.file_uploader("Photo (JPG, PNG or WEBP)", type=["jpg", "jpeg", "png", "webp"])
+            if image:
+                st.caption(f"Current photo: {image}")
+            if st.form_submit_button("Save listing"):
+                try:
+                    wo.save_extras(pick, new_scale, show, pic.getvalue() if pic else None, pic.name if pic else None)
+                    st.success("Saved. The website will show it on its next refresh.")
+                except ValueError as e:
+                    st.error(str(e))
 
-# Inventory table
-st.header("Car Inventory")
 
-if cars:
-    column_names = [
-        "ID",
-        "Brand",
-        "Model",
-        "Selling Price",
-        "Cost Price",
-        "Stock",
-        "Condition",
-        "Notes"
-    ]
-
-    inventory_df = pd.DataFrame(filtered_cars, columns=column_names)
-
-    st.dataframe(
-        inventory_df,
-        hide_index=True,
-        width="stretch"
-    )
-
-# ==========================================
-# EDIT AND DELETE INVENTORY
-# ==========================================
-
-st.divider()
-st.header("Manage Existing Inventory")
-
-if cars:
-    edit_options = {
-        f"ID {car[0]} - {car[1]} {car[2]}": car
-        for car in cars
-    }
-
-    selected_label = st.selectbox(
-        "Choose a car to manage",
-        list(edit_options.keys()),
-        key="manage_car_select",
-    )
-
-    selected_car = edit_options[selected_label]
-
-    st.subheader("Edit Car Details")
-
-    with st.form("edit_car_form"):
-        edit_brand = st.text_input(
-            "Brand",
-            value=selected_car[1],
-        )
-
-        edit_model = st.text_input(
-            "Model",
-            value=selected_car[2],
-        )
-
-        edit_price = st.number_input(
-            "Selling Price (INR)",
-            min_value=0.01,
-            value=max(float(selected_car[3]), 0.01),
-            step=1.0,
-        )
-
-        edit_cost = st.number_input(
-            "Cost Price (INR)",
-            min_value=0.0,
-            value=max(float(selected_car[4]), 0.0),
-            step=1.0,
-        )
-
-        edit_stock = st.number_input(
-            "Stock Quantity",
-            min_value=0,
-            value=max(int(selected_car[5]), 0),
-            step=1,
-        )
-
-        edit_condition = st.selectbox(
-            "Condition",
-            ["New", "Used"],
-            index=0 if selected_car[6] == "New" else 1,
-        )
-
-        save_changes = st.form_submit_button("Save Changes")
-
-        if save_changes:
-            try:
-                update_car(
-                    selected_car[0],
-                    edit_brand,
-                    edit_model,
-                    edit_price,
-                    edit_cost,
-                    int(edit_stock),
-                    edit_condition,
-                )
-
-                st.success("Car details updated successfully!")
-                st.rerun()
-
-            except Exception as error:
-                st.error(f"Could not update car: {error}")
-
-    st.divider()
-    st.subheader("Delete Car")
-
-    st.warning(
-        "Cars with existing sales history cannot be deleted."
-    )
-
-    confirm_delete = st.checkbox(
-        "I understand that deleting a car cannot be undone.",
-        key="confirm_delete_car",
-    )
-
-    if st.button("Delete Selected Car", type="secondary"):
-        if not confirm_delete:
-            st.warning("Please confirm before deleting this car.")
-        else:
-            try:
-                delete_car(selected_car[0])
-                st.success("Car deleted successfully!")
-                st.rerun()
-
-            except Exception as error:
-                st.error(f"Could not delete car: {error}")
-
-else:
-    st.info("Add a car before managing inventory.")
+# ---------- Navigation ----------
+PAGES = {"Dashboard": page_dashboard, "Inventory": page_inventory, "Sales": page_sales,
+         "Purchases": page_purchases, "Suppliers & expenses": page_business,
+         "Reports & invoices": page_reports, "Website": page_website}
+with st.sidebar:
+    st.markdown('<div class="brand">🏎️ Diecast Store</div>', unsafe_allow_html=True)
+    st.caption("Inventory, sales and profit in one place.")
+    if wo.pending_count():
+        st.warning(f"{wo.pending_count()} website order(s) waiting")
+    choice = st.radio("Go to", list(PAGES), label_visibility="collapsed")
+PAGES[choice]()
