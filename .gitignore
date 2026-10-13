@@ -4,10 +4,10 @@ __pycache__/
 *.py[cod]
 
 # Local databases and backups
-*.db
-*.db-journal
-*.sqlite
-*.sqlite3
+# *.db
+# *.db-journal
+# *.sqlite
+# *.sqlite3
 
 # Secrets and environment files
 .env
