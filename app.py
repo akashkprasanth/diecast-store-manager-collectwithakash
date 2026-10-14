@@ -1,4 +1,7 @@
+import hmac
+import os
 import re
+from urllib.parse import quote
 from datetime import date, timedelta
 from io import BytesIO
 
@@ -558,14 +561,284 @@ def page_website():
                     st.error(str(e))
 
 
-# ---------- Navigation ----------
-PAGES = {"Dashboard": page_dashboard, "Inventory": page_inventory, "Sales": page_sales,
-         "Purchases": page_purchases, "Suppliers & expenses": page_business,
-         "Reports & invoices": page_reports, "Website": page_website}
-with st.sidebar:
-    st.markdown('<div class="brand">🏎️ Diecast Store</div>', unsafe_allow_html=True)
-    st.caption("Inventory, sales and profit in one place.")
-    if wo.pending_count():
-        st.warning(f"{wo.pending_count()} website order(s) waiting")
-    choice = st.radio("Go to", list(PAGES), label_visibility="collapsed")
-PAGES[choice]()
+# ---------- Public storefront (inside the same app) ----------
+DEMO_CARS = [
+    ("Hot Wheels", "Ferrari SF90 Stradale", 179, 167, 10, "New"),
+    ("Hot Wheels", "Porsche 911 GT3 RS", 179, 167, 10, "New"),
+    ("Mini GT", "Nissan Skyline GT-R (R34)", 599, 480, 4, "New"),
+    ("Majorette", "Toyota Supra", 249, 190, 6, "New"),
+    ("Matchbox", "Land Rover Defender", 199, 150, 3, "Used"),
+]
+DEMO_SALES = [(1, 1, "Instagram", "Kochi"), (3, 2, "Telegram", "Chennai"), (4, 1, "Website", "Bengaluru")]
+
+
+def page_shop():
+    st.title("Available Cars")
+    st.caption("First come, first served. Choose your cars, then place your order.")
+    if st.session_state.get("shop_done"):
+        st.success(st.session_state.pop("shop_done"))
+    cars = wo.public_cars()
+    if not cars:
+        st.info("Nothing is listed right now. Check back soon.")
+        return
+    qty = {}
+    with st.form("shop_form"):
+        cols = st.columns(3)
+        for i, c in enumerate(cars):
+            with cols[i % 3].container(border=True):
+                img = wo.MEDIA_DIR / c["image"] if c["image"] else None
+                if img and img.exists():
+                    st.image(str(img), use_container_width=True)
+                st.markdown(f"**{c['brand']}**  \n{c['model']}")
+                st.markdown(f"### {RS.format(c['price'])}")
+                st.caption(f"Scale {c['scale']} · {c['condition']} · {c['status']}")
+                if c["available"] > 0:
+                    qty[c["id"]] = st.number_input("Quantity", 0, int(c["available"]), 0, 1, key=f"shop_q{c['id']}")
+                else:
+                    st.error("Sold out")
+        st.subheader("Your details")
+        d = st.columns(3)
+        name, phone, city = d[0].text_input("Name"), d[1].text_input("Phone"), d[2].text_input("City")
+        go = st.form_submit_button("Place order", type="primary")
+    if go:
+        items = [(k, v) for k, v in qty.items() if v > 0]
+        if not items:
+            st.error("Choose a quantity on at least one car.")
+        elif not name.strip():
+            st.error("Enter your name.")
+        elif not re.fullmatch(r"\+?[0-9 ]{7,15}", phone.strip()):
+            st.error("Enter a valid phone number.")
+        else:
+            try:
+                res = wo.create_order(name.strip(), phone.strip(), city.strip(), items)
+                for k in [k for k in st.session_state if str(k).startswith("shop_q")]:
+                    del st.session_state[k]
+                st.session_state["shop_done"] = (f"Order #{res['id']} placed ({RS.format(res['total'])}). "
+                                                 "The seller will contact you to arrange payment and delivery.")
+                st.rerun()
+            except wo.OrderError as e:
+                st.error(str(e))
+
+
+# ---------- Access and navigation ----------
+def admin_password():
+    try:
+        return st.secrets["admin_password"]
+    except Exception:
+        return os.environ.get("ADMIN_PASSWORD", "")
+
+
+def maybe_seed():
+    """Optional: fill a fresh database with sample data (set demo_seed = true in secrets)."""
+    try:
+        if not st.secrets.get("demo_seed", False):
+            return
+    except Exception:
+        return
+    try:
+        if get_inventory():
+            return
+        for c in DEMO_CARS:
+            add_car(*c)
+        for s in DEMO_SALES:
+            log_order(*s)
+    except Exception as e:
+        st.warning(f"Could not add demo data: {e}")
+
+
+def login_box():
+    pw = admin_password()
+    with st.expander("Owner login"):
+        if not pw:
+            st.info("Set admin_password in .streamlit/secrets.toml to enable the Manager.")
+            return
+        entered = st.text_input("Password", type="password", key="admin_pw")
+        if st.button("Log in"):
+            if hmac.compare_digest(entered, pw):
+                st.session_state["admin"] = True
+                st.rerun()
+            else:
+                st.error("Wrong password.")
+
+
+# ---------- Public website (rebuilt from index.html) ----------
+SITE = "https://collectwithakash.github.io"  # images are loaded from your existing GitHub Pages site
+CATEGORIES = ["HOT WHEELS", "MINI GT", "MATCHBOX", "MAJORETTE", "KAIDO HOUSE", "INNO64",
+              "TARMAC WORKS", "TOMICA", "GREENLIGHT", "AUTO WORLD"]
+STATS = [("100+", "Cars Collected"), ("1+", "Hotwheels Elite64"), ("10+", "Hotwheels Premiums"),
+         ("4+", "Hotwheels Silver Series"), ("4+", "Mini GT"), ("2+", "Majorette"), ("4+", "Match Box")]
+PUBLIC_CSS = """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@300;500;700;900&display=swap');
+html{scroll-behavior:smooth;}
+header[data-testid="stHeader"],[data-testid="stToolbar"],section[data-testid="stSidebar"],
+[data-testid="stSidebarCollapsedControl"]{display:none !important;}
+.stApp{background:#050505;}
+.block-container{padding:0 !important;max-width:100% !important;}
+.stApp h1,.stApp h2,.stApp h3,.stApp p,.stApp label,.stApp button,.stApp input,.stApp a,[class^="cw-"]{font-family:'Montserrat',sans-serif;}
+.stApp h1,.stApp h2,.stApp h3,.stApp [data-testid="stWidgetLabel"] p,.stApp [data-testid="stCaptionContainer"],
+.stApp [data-testid="stMarkdownContainer"] p{color:#fff !important;}
+div[data-testid="stForm"],[data-testid="stVerticalBlockBorderWrapper"]{background:#111 !important;border-color:#2a2a2a !important;}
+.stButton>button,.stFormSubmitButton>button{background:#ff0000;color:#fff;border:0;font-weight:700;}
+.stButton>button:hover,.stFormSubmitButton>button:hover{background:#cc0000;color:#fff;}
+.stApp [data-testid="stAlert"] p{color:#111 !important;}
+.cw-nav{position:fixed;top:0;left:0;right:0;z-index:1000;display:flex;justify-content:space-between;align-items:center;
+padding:20px 50px;background:rgba(0,0,0,.85);backdrop-filter:blur(10px);}
+.cw-logo{font-size:32px;font-weight:900;letter-spacing:2px;color:#fff !important;text-decoration:none;}
+.cw-logo span{color:#f00;}
+.cw-links{display:flex;align-items:center;gap:30px;}
+.cw-link{color:#fff !important;text-decoration:none;font-weight:600;}
+.cw-dsm{background:#f00;padding:8px 16px;border-radius:6px;font-weight:700;}
+.cw-dsm:hover{background:#cc0000;}
+.cw-hero{height:100vh;display:flex;align-items:center;padding:0 80px;background-size:cover;background-position:center;}
+.stApp .cw-hero h1{font-size:90px;font-weight:900;line-height:1;margin:0;padding:0;}
+.stApp .cw-hero p{margin-top:20px;font-size:20px;color:#d0d0d0 !important;max-width:700px;}
+.cw-buttons{margin-top:30px;}
+.cw-btn{display:inline-block;padding:15px 35px;margin-right:15px;background:#f00;color:#fff !important;text-decoration:none;border-radius:6px;font-weight:700;}
+.cw-btn:hover{background:#cc0000;}
+.cw-cats{display:flex;justify-content:center;gap:40px;padding:25px;background:#0d0d0d;overflow:auto;font-weight:700;white-space:nowrap;color:#fff;}
+.cw-sec{padding:80px 8%;}
+.stApp .cw-title{font-size:50px;font-weight:900;margin-bottom:40px;color:#fff !important;}
+.cw-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:25px;}
+.cw-card{background:#111;border-radius:15px;overflow:hidden;display:flex;flex-direction:column;text-decoration:none;transition:.3s;}
+.cw-card:hover{transform:translateY(-10px);}
+.cw-card img{width:100%;height:250px;object-fit:cover;display:block;}
+.cw-gal{display:grid;grid-template-columns:repeat(3,1fr);gap:5px;height:250px;}
+.cw-gal img{height:100%;}
+.cw-body{padding:20px;}
+.stApp .cw-body h3{margin:0 0 10px;}
+.stApp .cw-body p{margin:0;color:#bbb !important;}
+.cw-stat{background:#111;padding:40px;text-align:center;border-radius:15px;color:#fff;}
+.cw-stat b{display:block;font-size:50px;color:red;}
+.stApp .cw-foot{padding:40px;text-align:center;background:#000;color:#888 !important;}
+@media(max-width:768px){
+.cw-nav{padding:15px;flex-direction:column;gap:10px;}.cw-logo{font-size:24px;}
+.cw-hero{padding:20px;text-align:center;justify-content:center;}
+.stApp .cw-hero h1{font-size:42px;}.stApp .cw-hero p{font-size:16px;}
+.cw-btn{display:block;margin:0 0 10px;text-align:center;}
+.stApp .cw-title{font-size:32px;text-align:center;}}
+</style>
+"""
+
+
+def h(s):
+    """Strip indentation and blank lines so Streamlit's markdown never turns HTML into a code block."""
+    return "\n".join(l.strip() for l in s.splitlines() if l.strip())
+
+
+def src(p):
+    return p if p.startswith("http") else f"{SITE}/{quote(p)}"
+
+
+def site_card(title, text, imgs=(), href=None):
+    srcs = [src(p) for p in imgs]
+    if not srcs:
+        pics = ""
+    elif len(srcs) == 1:
+        pics = f'<img src="{srcs[0]}">'
+    else:
+        pics = '<div class="cw-gal">' + "".join(f'<img src="{s}">' for s in srcs) + "</div>"
+    tag, attrs = ("a", f' href="{href}" target="_blank"') if href else ("div", "")
+    return f'<{tag} class="cw-card"{attrs}>{pics}<div class="cw-body"><h3>{title}</h3><p>{text}</p></div></{tag}>'
+
+
+def section(title, cards, sid="", extra=""):
+    st.markdown(h(f'<div class="cw-sec" id="{sid}"><div class="cw-title">{title}</div>'
+                  f'<div class="cw-grid">{"".join(cards)}</div>{extra}</div>'), unsafe_allow_html=True)
+
+
+def site_header():
+    st.markdown(h(f"""
+        <div class="cw-nav"><a class="cw-logo" href="?" target="_self">COLLECT<span>WITHAKASH</span></a>
+        <div class="cw-links">
+        <a class="cw-link" href="https://www.instagram.com/collectwithakash/" target="_blank">Instagram</a>
+        <a class="cw-link" href="https://www.threads.com/@collectwithakash" target="_blank">Threads</a>
+        <a class="cw-link cw-dsm" href="?view=manager" target="_self">DSM</a></div></div>"""),
+        unsafe_allow_html=True)
+
+
+def site_footer():
+    st.markdown('<div class="cw-foot">© 2026 CollectwithAkash | Diecast Collector</div>', unsafe_allow_html=True)
+
+
+def page_home():
+    bg = f"linear-gradient(to right,rgba(0,0,0,.9),rgba(0,0,0,.4)),url('{src('images/IMG_8621.JPG')}')"
+    st.markdown(h(f"""
+        <div class="cw-hero" style="background-image:{bg}"><div>
+        <h1>COLLECT WITH AKASH</h1>
+        <p>Premium Diecast Collection Showcase. Hot Wheels • Mini GT • Majorette • Matchbox •</p>
+        <div class="cw-buttons"><a class="cw-btn" href="#collection">View Collection</a>
+        <a class="cw-btn" href="?view=shop" target="_self">Sale</a></div>
+        </div></div>"""), unsafe_allow_html=True)
+    st.markdown('<div class="cw-cats">' + "".join(f"<div>{c}</div>" for c in CATEGORIES) + "</div>", unsafe_allow_html=True)
+    st.markdown(h('<div class="cw-sec"><div class="cw-title">COLLECTION STATS</div><div class="cw-grid">'
+                  + "".join(f'<div class="cw-stat"><b>{n}</b>{t}</div>' for n, t in STATS) + "</div></div>"),
+                unsafe_allow_html=True)
+    section("FEATURED COLLECTION", [
+        site_card("Hotwheels Ferrari Collection", "Ferrari diecast models.",
+                  ["Ferrari/IMG_8627 (1).JPG", "Ferrari/IMG_8624 (2).JPG", "Ferrari/IMG_8625 (3).JPG"], f"{SITE}/ferrari.html"),
+        site_card("Mini GT Porsche Collection", "Detailed collector-grade models.",
+                  ["https://images.unsplash.com/photo-1553440569-bcc63803a83d?q=80&w=1200"]),
+        site_card("Bburago Ferrari Collection", "1:64 Ratio.",
+                  ["https://images.unsplash.com/photo-1502877338535-766e1452684a?q=80&w=1200"]),
+    ], sid="collection")
+    section("MAGAZINE BY COLLECTWITHAKASH", [
+        site_card("Metallic Marvels", "Featured diecast stories and showcases.", ["images/metallic_marvels.jpg"]),
+        site_card("Flam3z_On", "Collector highlights and latest finds.",
+                  ["Flam3z_On/1000398701.jpg.jpeg", "Flam3z_On/1000398661.jpg.jpeg", "Flam3z_On/1000398702.jpg.jpeg"]),
+        site_card("Mr. Scleropages", "Magazine articles and collection features.", ["images/mr_scleropages.jpg"]),
+    ])
+    section("FOR SALE AT MRP", [
+        site_card("Available Cars", "View all available stock.", href="?view=shop"),
+        site_card("First Come First Serve", "Reply quickly before items are sold."),
+    ], sid="sale")
+    site_footer()
+
+
+def page_login():
+    st.markdown("<style>.block-container{padding:140px 8% 40px !important;}</style>", unsafe_allow_html=True)
+    _, mid, _ = st.columns([1, 2, 1])
+    with mid:
+        st.title("Diecast Store Manager")
+        pw = admin_password()
+        if not pw:
+            st.info("Owner login is not set up. Add admin_password to the app secrets.")
+            return
+        with st.form("login_form"):
+            entered = st.text_input("Password", type="password")
+            if st.form_submit_button("Log in", type="primary"):
+                if hmac.compare_digest(entered, pw):
+                    st.session_state["admin"] = True
+                    st.rerun()
+                else:
+                    st.error("Wrong password.")
+
+
+maybe_seed()
+if not st.session_state.get("admin"):
+    view = st.query_params.get("view", "home")
+    st.markdown(PUBLIC_CSS, unsafe_allow_html=True)
+    site_header()
+    if view == "manager":
+        page_login()
+    elif view == "shop":
+        st.markdown("<style>.block-container{padding:140px 8% 40px !important;}</style>", unsafe_allow_html=True)
+        page_shop()
+        site_footer()
+    else:
+        page_home()
+
+else:
+    PAGES = {"Dashboard": page_dashboard, "Inventory": page_inventory, "Sales": page_sales,
+             "Purchases": page_purchases, "Suppliers & expenses": page_business,
+             "Reports & invoices": page_reports, "Website": page_website, "Storefront preview": page_shop}
+    with st.sidebar:
+        st.markdown('<div class="brand">🏎️ Diecast Store</div>', unsafe_allow_html=True)
+        st.caption("Inventory, sales and profit in one place.")
+        if wo.pending_count():
+            st.warning(f"{wo.pending_count()} website order(s) waiting")
+        choice = st.radio("Go to", list(PAGES), label_visibility="collapsed")
+        if st.button("Log out"):
+            st.session_state["admin"] = False
+            st.rerun()
+    PAGES[choice]()
