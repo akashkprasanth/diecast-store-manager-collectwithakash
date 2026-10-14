@@ -572,6 +572,22 @@ DEMO_CARS = [
 DEMO_SALES = [(1, 1, "Instagram", "Kochi"), (3, 2, "Telegram", "Chennai"), (4, 1, "Website", "Bengaluru")]
 
 
+def auto_confirm_enabled():
+    """Secrets: auto_confirm = true (default) records each website order as a sale immediately."""
+    try:
+        return bool(st.secrets.get("auto_confirm", True))
+    except Exception:
+        return True
+
+
+def try_confirm(order_id):
+    try:
+        wo.confirm_order(order_id)
+        return True
+    except Exception:
+        return False  # stays Pending; confirm it manually in Website > Orders
+
+
 def page_shop():
     st.title("Available Cars")
     st.caption("First come, first served. Choose your cars, then place your order.")
@@ -611,10 +627,13 @@ def page_shop():
         else:
             try:
                 res = wo.create_order(name.strip(), phone.strip(), city.strip(), items)
+                confirmed = auto_confirm_enabled() and try_confirm(res["id"])
                 for k in [k for k in st.session_state if str(k).startswith("shop_q")]:
                     del st.session_state[k]
-                st.session_state["shop_done"] = (f"Order #{res['id']} placed ({RS.format(res['total'])}). "
-                                                 "The seller will contact you to arrange payment and delivery.")
+                st.session_state["shop_done"] = (
+                    f"Order #{res['id']} confirmed ({RS.format(res['total'])}). Thank you!" if confirmed else
+                    f"Order #{res['id']} placed ({RS.format(res['total'])}). "
+                    "The seller will contact you to arrange payment and delivery.")
                 st.rerun()
             except wo.OrderError as e:
                 st.error(str(e))
