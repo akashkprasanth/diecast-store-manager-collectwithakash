@@ -321,7 +321,7 @@ def page_purchases():
             sel = st.selectbox("Diecast model", list(opts))
             c = st.columns(4)
             qty = c[0].number_input("Quantity", min_value=1, value=1, step=1)
-            unit = c[1].number_input("Cost per unit (₹)", min_value=0.0, step=10.0, format="%.2f")
+            unit = c[1].number_input("Cost Price (₹)", min_value=0.0, step=10.0, format="%.2f")
             supplier = c[2].text_input("Supplier")
             when = c[3].date_input("Purchase date")
             notes = st.text_area("Notes (optional)", height=70)

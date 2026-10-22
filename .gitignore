@@ -1,23 +1,31 @@
 ﻿.venv/
 venv/
-__pycache__/
+**pycache**/
 *.py[cod]
 
 # Local databases and backups
-# *.db
-# *.db-journal
-# *.sqlite
-# *.sqlite3
+
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
 
 # Secrets and environment files
+
 .env
 .env.*
 !.env.example
 
+# Streamlit secrets
+
+.streamlit/secrets.toml
+
 # Editor files and logs
+
 .vscode/
 .idea/
 *.log
 
 # Local application backups
+
 app_backup*.py
